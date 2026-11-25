@@ -32,47 +32,33 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import com.android.bluetooth.btservice.ProfileService;
-
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.content.Context;
-import android.content.Intent;
 import android.media.MediaMetadata;
 import android.os.Message;
 import android.util.Log;
 
+/**
+ * AVRCP controller cover art (AVRCP 1.6 over BIP): asks the BIP client for the current
+ * track's image and publishes it with the track metadata.
+ *
+ * Ported to the Android 10 AVRCP controller, where the current track's TrackInfo is
+ * AvrcpPlayer.getCurrentTrackInfo() (getCurrentTrack() is now the MediaMetadata) and the
+ * metadata is published through AvrcpPlayer.updateCurrentTrack() and
+ * BluetoothMediaBrowserService.trackChanged(). The previous version was commented out to
+ * compile against that controller ("A2dpSink: Remove CoverArt changes to compile SHO code").
+ */
 public class CoverArtUtils {
 
     private final String TAG = "AvrcpControllerCoverArt";
 
     private static final boolean DBG = true;
 
-    private final String EXTRA_METADATA_IS_INVALID_HANDLE = "is_invalid_handle";
-
     static final int MESSAGE_BIP_CONNECTED = 500;
     static final int MESSAGE_BIP_DISCONNECTED = 501;
     static final int MESSAGE_BIP_THUMB_NAIL_FETCHED = 502;
     static final int MESSAGE_BIP_IMAGE_FETCHED = 503;
-
-    public void broadcastInValidHandle(Context ctx, AvrcpControllerService avrcpService,
-            boolean streamAvailable) {
-        if ((avrcpService == null || avrcpService.getConnectedDevices().size() <= 1)
-                && !streamAvailable) {
-            broadcastInValidHandle(ctx, new MediaMetadata.Builder().build());
-        }
-    }
-
-    private void broadcastInValidHandle(Context ctx, MediaMetadata metadata) {
-        /*Intent intent = new Intent(AvrcpControllerService.ACTION_TRACK_EVENT);
-        intent.putExtra(AvrcpControllerService.EXTRA_METADATA, metadata);
-        intent.putExtra(EXTRA_METADATA_IS_INVALID_HANDLE, true);
-        if (DBG) {
-            Log.d(TAG, " broadcastInValidHandle = " + metadata.getDescription());
-        }
-        intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-        ctx.sendBroadcast(intent, ProfileService.BLUETOOTH_PERM); */
-    }
 
     public void onElementAttributeUpdate(byte[] address, byte numAttributes, int[] attributes,
             String[] attribVals, BluetoothDevice connectedDevice,
@@ -90,13 +76,15 @@ public class CoverArtUtils {
            attrList.add(attr);
         }
         List<String> attrValList = Arrays.asList(attribVals);
-        //TrackInfo trackInfo = new TrackInfo(attrList, attrValList);
-        //if (DBG) {
-        //    Log.d(TAG, "onElementAttributeUpdate " + trackInfo);
-        //}
-        //Message msg = avrcpCtSm.obtainMessage(
-        //        AvrcpControllerStateMachine.MESSAGE_PROCESS_TRACK_CHANGED, trackInfo);
-        //avrcpCtSm.sendMessage(msg);
+        // Attributes re-read after BIP connected: handle them as the current track, which
+        // requests its image.
+        TrackInfo trackInfo = new TrackInfo(attrList, attrValList);
+        if (DBG) {
+            Log.d(TAG, "onElementAttributeUpdate " + trackInfo);
+        }
+        Message msg = avrcpCtSm.obtainMessage(
+                AvrcpControllerStateMachine.MESSAGE_PROCESS_TRACK_CHANGED, trackInfo);
+        avrcpCtSm.sendMessage(msg);
     }
 
     public void msgDisconnectBip(AvrcpControllerBipStateMachine bipStateMachine,
@@ -117,80 +105,104 @@ public class CoverArtUtils {
         }
     }
 
+    /**
+     * The current track changed: requests its cover art. Returns false if the track has no
+     * cover art handle (the remote doesn't support cover art, or BIP isn't connected yet).
+     */
     public boolean msgTrackChanged(Context ctx, AvrcpControllerBipStateMachine bipStateMachine,
             AvrcpPlayer addressedPlayer, RemoteDevice remoteDevice) {
-        /*boolean isValidHandle = !addressedPlayer.getCurrentTrack().getCoverArtHandle().isEmpty();
-        if (bipStateMachine != null && isValidHandle) {
-            int imageOrThumbnail;
-            if (AvrcpControllerBipStateMachine.mImageType.equalsIgnoreCase("thumbnail")) {
-                imageOrThumbnail = AvrcpControllerBipStateMachine.MESSAGE_FETCH_THUMBNAIL;
-            } else {
-                imageOrThumbnail = AvrcpControllerBipStateMachine.MESSAGE_FETCH_IMAGE;
-            }
-            //bipStateMachine.sendMessage(imageOrThumbnail,
-            //        addressedPlayer.getCurrentTrack().getCoverArtHandle());
-        }
-        if (!isValidHandle && remoteDevice != null && remoteDevice.isCoverArtSupported()) {
-            if (DBG) {
+        TrackInfo track = addressedPlayer.getCurrentTrackInfo();
+        String handle = track != null ? track.getCoverArtHandle() : null;
+        if (handle == null || handle.isEmpty()) {
+            if (DBG && remoteDevice != null && remoteDevice.isCoverArtSupported()) {
                 Log.d(TAG, " Cover Art Handle not valid ");
             }
-            //broadcastInValidHandle(ctx, addressedPlayer.getCurrentTrack().getMediaMetaData());
             return false;
-        }*/
+        }
+        if (track.hasCoverArt()) {
+            return true; // carried over from the previous update of the same track
+        }
+        fetchCoverArt(bipStateMachine, handle);
         return true;
     }
 
+    private void fetchCoverArt(AvrcpControllerBipStateMachine bipStateMachine, String handle) {
+        if (bipStateMachine == null) {
+            return;
+        }
+        int imageOrThumbnail;
+        if ("thumbnail".equalsIgnoreCase(AvrcpControllerBipStateMachine.mImageType)) {
+            imageOrThumbnail = AvrcpControllerBipStateMachine.MESSAGE_FETCH_THUMBNAIL;
+        } else {
+            imageOrThumbnail = AvrcpControllerBipStateMachine.MESSAGE_FETCH_IMAGE;
+        }
+        if (DBG) {
+            Log.d(TAG, " fetch cover art, handle " + handle + " type "
+                    + AvrcpControllerBipStateMachine.mImageType);
+        }
+        bipStateMachine.sendMessage(imageOrThumbnail, handle);
+    }
+
     public void processBipAction(Context ctx, AvrcpPlayer addressedPlayer,
-            RemoteDevice remoteDevice, int bipAction, Message msg) {
+            RemoteDevice remoteDevice, int bipAction, Message msg,
+            AvrcpControllerBipStateMachine bipStateMachine) {
         if (DBG) {
             Log.d(TAG, " processBipAction bipAction: " + bipAction);
         }
+        TrackInfo track = addressedPlayer.getCurrentTrackInfo();
         switch (bipAction) {
             case MESSAGE_BIP_CONNECTED:
-               //if (addressedPlayer.getCurrentTrack().getCoverArtHandle().isEmpty()
-               //     && remoteDevice != null) {
-                /*
-                 * track changed happened before BIP connection. should fetch cover art handle.
-                 * NumAttributes = 0 and attributes list as null will fetch all attributes
-                 */
+                if ((track == null || track.getCoverArtHandle().isEmpty())
+                        && remoteDevice != null) {
+                    /*
+                     * The track changed before BIP connected, so it has no cover art handle:
+                     * fetch the attributes again (NumAttributes = 0 and a null attribute list
+                     * fetch all of them); the reply comes back as onElementAttributeUpdate().
+                     */
                     AvrcpControllerService.getElementAttributesNative(
                             remoteDevice.getBluetoothAddress(), (byte) 0, null);
-                //}
-            break;
+                } else if (track != null && !track.getCoverArtHandle().isEmpty()
+                        && !track.hasCoverArt()) {
+                    fetchCoverArt(bipStateMachine, track.getCoverArtHandle());
+                }
+                break;
             case MESSAGE_BIP_DISCONNECTED:
-                // clear cover art related info for current track.
-                //addressedPlayer.getCurrentTrack().clearCoverArtData();
-            break;
+                // Clear the current track's cover art; its handle is only valid on that session.
+                if (track != null) {
+                    boolean hadCoverArt = track.hasCoverArt();
+                    track.clearCoverArtData();
+                    if (hadCoverArt) {
+                        publish(addressedPlayer, track);
+                    }
+                }
+                break;
             case MESSAGE_BIP_IMAGE_FETCHED:
-                /*boolean imageUpdated = addressedPlayer.getCurrentTrack().updateImageLocation(
-                msg.getData().getString(AvrcpControllerBipStateMachine.COVER_ART_HANDLE),
-                msg.getData()
-                    .getString(AvrcpControllerBipStateMachine.COVER_ART_IMAGE_LOCATION));
-                if (imageUpdated) {
-                    broadcastMetaDataChanged(ctx,
-                        addressedPlayer.getCurrentTrack().getMediaMetaData());
-                } */
-            break;
+                if (track != null && track.updateImageLocation(
+                        msg.getData().getString(AvrcpControllerBipStateMachine.COVER_ART_HANDLE),
+                        msg.getData()
+                            .getString(AvrcpControllerBipStateMachine.COVER_ART_IMAGE_LOCATION))) {
+                    publish(addressedPlayer, track);
+                }
+                break;
             case MESSAGE_BIP_THUMB_NAIL_FETCHED:
-                /*boolean thumbNailUpdated = addressedPlayer.getCurrentTrack().updateThumbNailLocation
-                    (msg.getData().getString(AvrcpControllerBipStateMachine.COVER_ART_HANDLE),
-                     msg.getData()
-                     .getString(AvrcpControllerBipStateMachine.COVER_ART_IMAGE_LOCATION));
-            if (thumbNailUpdated) {
-                broadcastMetaDataChanged(ctx,
-                    addressedPlayer.getCurrentTrack().getMediaMetaData());
-            }*/
-            break;
+                if (track != null && track.updateThumbNailLocation(
+                        msg.getData().getString(AvrcpControllerBipStateMachine.COVER_ART_HANDLE),
+                        msg.getData()
+                            .getString(AvrcpControllerBipStateMachine.COVER_ART_IMAGE_LOCATION))) {
+                    publish(addressedPlayer, track);
+                }
+                break;
         }
     }
 
-    private void broadcastMetaDataChanged(Context ctx, MediaMetadata metadata) {
-        /*Intent intent = new Intent(AvrcpControllerService.ACTION_TRACK_EVENT);
-        intent.putExtra(AvrcpControllerService.EXTRA_METADATA, metadata);
+    /** Publishes the track's metadata (now with or without cover art) to media apps. */
+    private void publish(AvrcpPlayer addressedPlayer, TrackInfo track) {
+        MediaMetadata metadata = track.getMediaMetaData();
         if (DBG) {
-            Log.d(TAG, " broadcastMetaDataChanged = " + metadata.getDescription());
+            Log.d(TAG, " publish metadata, cover art " + track.hasCoverArt());
         }
-        ctx.sendBroadcast(intent, ProfileService.BLUETOOTH_PERM); */
+        addressedPlayer.updateCurrentTrack(metadata);
+        BluetoothMediaBrowserService.trackChanged(metadata);
     }
 
     public String dumpMessageString(int message) {
@@ -207,7 +219,6 @@ public class CoverArtUtils {
     public void closeBip(AvrcpControllerBipStateMachine bipStateMachine) {
         if (bipStateMachine != null) {
             bipStateMachine.doQuit();
-            bipStateMachine = null;
             if (DBG) {
                 Log.d(TAG, "mBipStateMachine doQuit ");
             }
