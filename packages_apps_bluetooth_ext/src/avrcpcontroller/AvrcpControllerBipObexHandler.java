@@ -397,6 +397,12 @@ class AvrcpControllerBipObexHandler extends Handler {
         @return location for thumbnail file on external storage.
      */
     public String getLinkedThumbnail(String imgHandle){
+        File btDir = checkForBluetoothDir();
+        //Should not go on if storage is not ready, because nothing can be stored.
+        if (btDir == null) {
+            if (DBG) Log.d(TAG, "Abort because storage is not ready.");
+            return null;
+        }
         // Check and return Image location if already exists
         String localPath = checkCoverArtOnLocalPath(THUMB_PREFIX,imgHandle);
         if (DBG) Log.d(TAG, "getLinkedThumbnil: localPath " + localPath + " ImgHandle: "
@@ -448,6 +454,13 @@ class AvrcpControllerBipObexHandler extends Handler {
         @return Bundle of imageData that is retreived.
      */
     private Bundle getImage(String imgHandle, String encoding, String pixel, long maxSize) {
+        File btDir = checkForBluetoothDir();
+        //Should not go on if storage is not ready, because nothing can be stored.
+        if (btDir == null) {
+            if (DBG) Log.d(TAG, "Abort because storage is not ready.");
+            return null;
+        }
+
         Bundle imageData = new Bundle();
         imageData.putString(AvrcpControllerBipStateMachine.COVER_ART_HANDLE, imgHandle);
         // Check and return Image location if already exists
